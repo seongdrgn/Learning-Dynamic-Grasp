@@ -2,11 +2,19 @@
 
 ## Simulation Environment (Isaac-Lab)
 
-1. Pretraining default policy via Asymmetric Actor-Critic
+Pretraining default policy via asymmetric actor-critic
 
+* Training
+  
    ```python source/standalone/workflows/rl_games/train.py --task Isaac-Dynamic-Catch-rl_games --num_envs=2048 --headless```
 
-3. Training "Goal Estimator" for predicting goal position of the thrown object
+* Evaluation
+  
+   ```python source/standalone/workflows/rl_games/play.py --taks Isaac-Dynamic-Catch-rl_games --num_envs=1 --checkpoint=/your_root/IsaacLab/logs/rl_games/dynamic_catch_asym/2024-08-22_10-58-12/nn/dynamic_catch_asym.pth```
+
+Training "Goal Estimator" for predicting goal position of the thrown object using pretrained policy
+
+* Training
 
    ```python source/standalone/workflows/rl_games/train.py --task Isaac-Dynamic-Catch-Goal-Estimator --num_envs=2048 --headless --enable_cameras```
    
