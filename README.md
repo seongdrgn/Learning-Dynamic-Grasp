@@ -19,3 +19,12 @@ Training "Goal Estimator" for predicting goal position of the thrown object usin
    ```python source/standalone/workflows/rl_games/train.py --task Isaac-Dynamic-Catch-Goal-Estimator --num_envs=2048 --headless --enable_cameras```
    
    "Goal Estimator"'s inputs are initial depth images and outputs goal position of the thrwon object
+
+## Troubleshooting
+
+For anaconda users
+
+> Users must complete installation the Isaac-Lab
+```
+cd /your/workspace/IsaacLab/_isaac_sim && source setup_conda_env.sh
+```
