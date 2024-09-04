@@ -22,6 +22,10 @@
    
    "Goal Estimator"'s inputs are sequential depth images for t timesteps and outputs goal position of the thrwon object
 
+## Real Environment
+
+On going project...
+
 ## Troubleshooting
 
 For anaconda users
