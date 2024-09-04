@@ -17,27 +17,19 @@ from omni.isaac.core.utils.stage import get_current_stage
 from omni.isaac.core.utils.torch.transformations import tf_combine, tf_inverse, tf_vector
 from pxr import UsdGeom
 
+import os
 import torch
 from typing import Sequence
 import math
 import numpy as np
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models
 
 ##
 # Pre-defined configs
 ##
 from torch._tensor import Tensor
-
-# class GoalEstimator(nn.Module):
-#     def __init__(self):
-#         self.load_image_net()
-
-#     def load_image_net(self):
-#         self.image_net = models.resnet18(pretrained=False)
-
-#     def forward(self, image: Tensor):
-#         return self.image_net(image)
 
 @configclass
 class DynamicCatchEnvCfgV2(DirectRLEnvCfg):
@@ -72,7 +64,7 @@ class DynamicCatchEnvCfgV2(DirectRLEnvCfg):
 
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=2048, env_spacing=3.5, replicate_physics=True)
+        num_envs=2048, env_spacing=5.0, replicate_physics=True)
 
     robot = ArticulationCfg(
         prim_path="/World/envs/env_.*/Robot",
@@ -180,7 +172,7 @@ class DynamicCatchEnvCfgV2(DirectRLEnvCfg):
     curtain = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Curtain",
         spawn=sim_utils.CuboidCfg(
-            size=(4.0, 0.1, 8.0),
+            size=(8.0, 0.1, 8.0),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -1.0, 0.0),
@@ -206,9 +198,9 @@ class DynamicCatchEnvCfgV2(DirectRLEnvCfg):
         width=640,
         data_types=["rgb","distance_to_image_plane"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.995, clipping_range=(0.1,1.0e5)
+            focal_length=0.193*100, focus_distance=400.0, f_stop=0.0, horizontal_aperture=0.02682*1000, clipping_range=(0.01,1e6)
         ),
-        offset=CameraCfg.OffsetCfg(pos=(1.0, 1.0, 0.81), rot=(0, 0.7071068, 0, 0.7071068), convention="world")
+        offset=CameraCfg.OffsetCfg(pos=(1.5, 2.5, 1.2), rot=(-0.7071068, 0, 0, 0.7071068), convention="world")
         # offset=CameraCfg.OffsetCfg(pos=(0.510, 0.0, 0.015), rot=(0.5, -0.5, 0.5, -0.5), convention="ros")
     )
 
@@ -299,6 +291,42 @@ class DynamicCatchEnvCfgV2(DirectRLEnvCfg):
 #         func=mdp.
 #     )
 
+class GoalEstimator(nn.Module):
+    def __init__(self, input_w, input_h):
+        super(GoalEstimator, self).__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(in_channels=4, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.prediction_layers = nn.Sequential(
+            nn.Linear(128*(input_w//8)*(input_h//8), 512),
+            nn.ReLU(),
+            nn.Linear(512, 3)
+        )
+    
+    def forward(self, x):
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1)
+        x = self.prediction_layers(x)
+        return x
+
+class TemporaryGrad(object):
+    def __enter__(self):
+        self.prev = torch.is_grad_enabled()
+        torch.set_grad_enabled(True)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        torch.set_grad_enabled(self.prev)
+
 class DynamicCatchEnvV2(DirectRLEnv):
     # pre-physics step calls
     #   |-- _pre_physics_step(action)
@@ -317,7 +345,13 @@ class DynamicCatchEnvV2(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # set goal estimator
-        # self.goal_estimator = GoalEstimator()
+        self.goal_estimator = GoalEstimator(input_h=cfg.camera.height, input_w=cfg.camera.width).to(self.device)
+        for param in self.goal_estimator.parameters():
+            param.requires_grad_(True)
+        self.goal_estimator_optimizer = torch.optim.Adam(self.goal_estimator.parameters(), lr=1e-4)
+        self.goal_estimator_save_path = "/home/kimsy/RL-kimsy/IsaacLab/source/extensions/omni.isaac.lab_tasks/omni/isaac/lab_tasks/direct/catchpolicy/goal_estimator.pth"
+        os.makedirs(os.path.dirname(self.goal_estimator_save_path), exist_ok=True)
+        self.goal_estimator.train()
 
         self.dt = self.cfg.sim.dt * self.cfg.decimation
 
@@ -370,9 +404,7 @@ class DynamicCatchEnvV2(DirectRLEnv):
             self.states_buf_stack_frames.append(torch.zeros((self.num_envs, self.cfg.one_frame_states), device=self.device))
 
         # buffers for images
-        self.image_buf_stack_frames = []
-        for i in range(self.cfg.image_stacks_num):
-            self.image_buf_stack_frames.append(torch.zeros((self.num_envs, self.cfg.camera.height, self.cfg.camera.width), device=self.device))
+        self.image_buf_stack_frames = torch.zeros((self.num_envs, self.cfg.image_stacks_num, self.cfg.camera.height, self.cfg.camera.width), device=self.device)
 
         self.reduced_obs_buf = torch.zeros((self.num_envs, self.cfg.one_frame_obs*self.cfg.num_stacks), device=self.device)
         self.state_buf = torch.zeros((self.num_envs, self.cfg.one_frame_states*self.cfg.num_stacks), device=self.device)
@@ -383,7 +415,7 @@ class DynamicCatchEnvV2(DirectRLEnv):
         self._contact_sensors = ContactSensor(self.cfg.contact_sensors)
         self._table = RigidObject(self.cfg.table)
         self._camera = Camera(self.cfg.camera)
-        self._d435 = RigidObject(self.cfg.D435)
+        # self._d435 = RigidObject(self.cfg.D435)
         self._curtain = RigidObject(self.cfg.curtain)
 
         # clone, filter, and replicate
@@ -477,9 +509,12 @@ class DynamicCatchEnvV2(DirectRLEnv):
             env_ids = self._robot._ALL_INDICES    
 
         super()._reset_idx(env_ids)
-
+        for i in range(self.cfg.num_stacks):
+            self.obs_buf_stack_frames[i][env_ids] = torch.zeros((self.cfg.one_frame_obs), device=self.device)
+            self.states_buf_stack_frames[i][env_ids] = torch.zeros((self.cfg.one_frame_states), device=self.device)
         self.reduced_obs_buf[env_ids] = torch.zeros((self.cfg.one_frame_obs*self.cfg.num_stacks),device=self.device)
         self.state_buf[env_ids] = torch.zeros((self.cfg.one_frame_states*self.cfg.num_stacks),device=self.device)
+        self.image_buf_stack_frames[env_ids] = torch.zeros((self.cfg.image_stacks_num, self.cfg.camera.height, self.cfg.camera.width), device=self.device)
 
         # robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids] + sample_uniform(
@@ -565,8 +600,11 @@ class DynamicCatchEnvV2(DirectRLEnv):
     def _get_observations(self) -> dict:
         self.compute_reduced_obs()
 
-        self.get_image_inputs()
-        print(self.image_buf_stack_frames[0].shape)
+        self.get_image_inputs(check_image=True)
+
+        with TemporaryGrad():
+            pred_goal_pos = self.goal_estimator(self.image_buf_stack_frames)
+            self.update_goal_estimator(pred_goal_pos)
 
         observations = {"policy": self.reduced_obs_buf}
         if self.cfg.asymmetric_obs:
@@ -613,6 +651,13 @@ class DynamicCatchEnvV2(DirectRLEnv):
         self.contact_sensors_val_raw = self.scene["contact_sensors"].data.net_forces_w[..., 2]
         self.contact_sensors_val = torch.where(self.contact_sensors_val_raw != 0.0, 1.0, 0.0)
 
+    def update_goal_estimator(self, pred_goal_pos):
+        self.pos_loss = F.mse_loss(pred_goal_pos, self.goal_pos)
+        loss = self.pos_loss
+        self.goal_estimator_optimizer.zero_grad()
+        loss.backward()
+        self.goal_estimator_optimizer.step()
+
     def get_image_inputs(self, check_image: bool = False):
         '''
         RGB : scene["caemra"].data.output["rgb"] -> (num_env, 3, height, width)
@@ -625,10 +670,7 @@ class DynamicCatchEnvV2(DirectRLEnv):
                 plt.imshow(self.image_per_env[i].cpu())
                 plt.savefig(f'/home/kimsy/RL-kimsy/IsaacLab/image_{i}.png')
                 plt.close()
-
-        for i in range(len(self.image_buf_stack_frames)-1):
-            self.image_buf_stack_frames[i+1] = self.image_buf_stack_frames[i]
-            self.image_buf_stack_frames[i] = self.image_per_env.clone()
+        self.image_buf_stack_frames = torch.cat([self.image_buf_stack_frames[:,1:], self.image_per_env.unsqueeze(1)], dim=1)
 
 @torch.jit.script
 def compute_rewards(
