@@ -20,7 +20,7 @@
 
    ```python source/standalone/workflows/rl_games/train.py --task Isaac-Dynamic-Catch-Goal-Estimator --num_envs=2048 --headless --enable_cameras```
    
-   "Goal Estimator"'s inputs are initial depth images and outputs goal position of the thrwon object
+   "Goal Estimator"'s inputs are sequential depth images for t timesteps and outputs goal position of the thrwon object
 
 ## Troubleshooting
 
