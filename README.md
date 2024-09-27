@@ -1,6 +1,7 @@
 # Learning Dynamic Grasp
 
 ## Simulation Environment (Isaac-Lab)
+<img src="https://github.com/user-attachments/assets/816f6280-6165-4b7d-8148-caf67805492d" width="600" height="312"> 
 
 ### Pretraining default policy via asymmetric actor-critic
 > Environment version : ```dynamic_catch_v1.py```
